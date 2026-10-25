@@ -419,13 +419,37 @@ StoreSource store_catalogue_update(const StoreConfig *config, StoreCatalogue *ca
 	return STORE_NONE;
 }
 
+bool store_app_folder(const StoreConfig *config, const StoreApp *app, char *folder, size_t folder_bytes)
+{
+	if (app->self)
+		return snprintf(folder, folder_bytes, "game:") < (int)folder_bytes;
+	return snprintf(folder, folder_bytes, "%s%s", config->apps, app->id) < (int)folder_bytes;
+}
+
+bool store_app_xex(const StoreConfig *config, const StoreApp *app, char *path, size_t path_bytes)
+{
+	char folder[STORE_PATH_BYTES];
+	if (!store_app_folder(config, app, folder, sizeof folder) ||
+		snprintf(path, path_bytes, "%s\\%s", folder, app->launch) >= (int)path_bytes)
+		return false;
+	for (char *c = path; *c; c++) {
+		if (*c == '/')
+			*c = '\\';
+	}
+	return true;
+}
+
 void store_installed_app(const StoreConfig *config, StoreApp *app)
 {
+	char folder[STORE_PATH_BYTES];
 	char path[STORE_PATH_BYTES];
 	app->installed = STORE_INSTALLED_NONE;
 	app->receipt = false;
 	app->receipt_author_same = false;
-	if (snprintf(path, sizeof path, "%s%s\\app.json", config->apps, app->id) < (int)sizeof path) {
+	app->self = config->self_title_id && app->title_id == config->self_title_id;
+	if (!store_app_folder(config, app, folder, sizeof folder))
+		return;
+	if (snprintf(path, sizeof path, "%s\\app.json", folder) < (int)sizeof path) {
 		uint8_t *data;
 		size_t size;
 		if (store_read_file(path, MAX_RECEIPT_BYTES, &data, &size)) {
@@ -437,13 +461,7 @@ void store_installed_app(const StoreConfig *config, StoreApp *app)
 			free(data);
 		}
 	}
-	if (snprintf(path, sizeof path, "%s%s\\%s", config->apps, app->id, app->launch) >= (int)sizeof path)
-		return;
-	for (char *c = path; *c; c++) {
-		if (*c == '/')
-			*c = '\\';
-	}
-	FILE *const file = fopen(path, "rb");
+	FILE *const file = store_app_xex(config, app, path, sizeof path) ? fopen(path, "rb") : NULL;
 	if (!file)
 		return;
 	uint8_t *const header = malloc(XEX_HEADER_BYTES);

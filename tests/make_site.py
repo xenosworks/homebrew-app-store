@@ -8,8 +8,12 @@ and another, and <out>/site the catalogues xsdk's tools/net_http.py --site serve
 - drop/, serial 5, good's but its packages under /site-drop/, which sends half and closes;
 - badupdate/, serial 8, alpha 1.1 with a byte of its package changed after signing; update/, serial 9, alpha 1.1, its
   data file data/new.txt in place of data/readme.txt;
-- badfile/, serial 5, good's with beta's data file signed with a SHA-256 its package's copy hasn't.
-Build the store and store_check with -DSTORE_PUBLIC_KEY=<out>/keys/test.pub.pem. A test key, never the catalogue's."""
+- badfile/, serial 5, good's with beta's data file signed with a SHA-256 its package's copy hasn't;
+- given --launch-target, launch/, serial 5, holding xsdk's launch_target.xex, which launches back what started it;
+- given --self-update, selfupdate/, serial 5, holding store_check, newer: the build's store_check_v2.xex;
+- given --store-update, selfstore/, serial 5, holding the store, newer: the build's homebrew_app_store_v2.xex.
+Build the store and store_check with -DSTORE_PUBLIC_KEY=<out>/keys/test.pub.pem, a test key, never the catalogue's,
+then run this again with the build's store_check_v2.xex."""
 
 import argparse
 import copy
@@ -66,20 +70,23 @@ def tool(xsdk, *arguments):
                    stdout=subprocess.DEVNULL)
 
 
-def write_variant(xsdk, folder, packages_base, serial, url, key, work, apps, edit=None):
+def write_variant(xsdk, folder, packages_base, serial, url, key, work, apps, edit=None, categories=CATEGORIES):
     shots = folder / "shots"
     shots.mkdir(parents=True)
     (shots / "alpha.png").write_bytes(png(1280, 720, b"\xff\xff\xff" * 640 + b"\xff\x00\x00" * 640))
     (shots / "beta.png").write_bytes(png(640, 640, b"\x00\x00\xff" * 640))
     catalogue = folder / "catalogue.json"
-    catalogue.write_text(json.dumps({"format": 1, "serial": serial - 1, "url": url, "categories": CATEGORIES,
+    catalogue.write_text(json.dumps({"format": 1, "serial": serial - 1, "url": url, "categories": categories,
                                      "apps": [{field: app[field] for field in FIELDS} for app in apps]}, indent=2))
     (folder / "packages").mkdir()
     for app in apps:
         app_folder = work / folder.name / app["id"]
         app_folder.mkdir(parents=True)
-        major, minor, build, fix = app["version"]
-        (app_folder / app["launch"]).write_bytes(xex(app["title_id"], major << 28 | minor << 24 | build << 8 | fix))
+        if "xex" in app:
+            (app_folder / app["launch"]).write_bytes(app["xex"])
+        else:
+            major, minor, build, fix = app["version"]
+            (app_folder / app["launch"]).write_bytes(xex(app["title_id"], major << 28 | minor << 24 | build << 8 | fix))
         for path, data in app["data"].items():
             (app_folder / path).parent.mkdir(parents=True, exist_ok=True)
             (app_folder / path).write_bytes(data)
@@ -103,6 +110,9 @@ def main():
     parser.add_argument("out", type=Path)
     parser.add_argument("--xsdk", type=Path, default=ROOT.parent / "Xbox-360-SDK", help="an xsdk checkout")
     parser.add_argument("--port", type=int, default=7380, help="net_http.py's HTTP port; HTTPS is the next")
+    parser.add_argument("--launch-target", type=Path, help="xsdk's build/launch_target.xex, for launch/")
+    parser.add_argument("--self-update", type=Path, help="the build's store_check_v2.xex, for selfupdate/")
+    parser.add_argument("--store-update", type=Path, help="the build's homebrew_app_store_v2.xex, for selfstore/")
     args = parser.parse_args()
     keys = args.out / "keys"
     keys.mkdir(parents=True, exist_ok=True)
@@ -116,6 +126,17 @@ def main():
     drop_base = f"https://localhost:{args.port + 1}/site-drop/"
     updated = copy.deepcopy(APPS)
     updated[0].update(version=(1, 1, 0, 0), changes="The second version.", data={"data/new.txt": b"alpha's new one\n"})
+    real = []
+    if args.launch_target:
+        real.append(("launch", dict(APPS[0], id="launch-target", name="launch_target", launch="launch_target.xex",
+                                    xex=args.launch_target.read_bytes(), data={})))
+    if args.self_update:
+        real.append(("selfupdate", dict(APPS[0], id="store-check", name="store_check", launch="store_check.xex",
+                                        xex=args.self_update.read_bytes(), data={})))
+    if args.store_update:
+        real.append(("selfstore", dict(APPS[0], id="homebrew-app-store", name="Homebrew App Store",
+                                       sentence="This store, newer.", launch="homebrew_app_store.xex",
+                                       xex=args.store_update.read_bytes(), data={})))
     with tempfile.TemporaryDirectory() as directory:
         work = Path(directory)
         for name, serial, url, key, packages_base, apps in (
@@ -126,6 +147,10 @@ def main():
                 ("badfile", 5, "badfile", "test", base, APPS)):
             write_variant(args.xsdk, site / name, packages_base, serial, f"{base}{url}/catalogue.json",
                           keys / f"{key}.pem", work, apps, wrong_file_hash if name == "badfile" else None)
+        # Tools alone, so the store's shots end on that app's page wherever they press down.
+        for name, app in real:
+            write_variant(args.xsdk, site / name, base, 5, f"{base}{name}/catalogue.json", keys / "test.pem", work,
+                          [app], categories=CATEGORIES[:1])
     byte = site / "byte"
     shutil.copytree(site / "good", byte)
     data = (byte / "catalogue.json").read_bytes()

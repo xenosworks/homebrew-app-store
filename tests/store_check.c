@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <curl/curl.h>
@@ -14,6 +15,7 @@
 #include "store.h"
 #include "xsdk/log.h"
 #include "xsdk/splash.h"
+#include "xsdk/xam.h"
 
 enum {
 	SPLASH_MS = 2000,
@@ -26,10 +28,20 @@ enum {
 	// tests/make_site.py's screenshot of alpha: white on its left half and red on its right, 16:9.
 	WHITE_PIXEL = 0xFFFFFFFF,
 	RED_PIXEL = 0xFF0000FF,
+	// The newer store_check's version, CMakeLists.txt's store_check_v2.
+	NEWER_VERSION = 2,
+	// A launch back comes within seconds.
+	RETURN_WINDOW_S = 60,
+	MAX_LINES = 40,
+	LINE_BYTES = 192,
 };
 
 static const char HOST_FILE[] = "game:\\net_http.txt";
 static const char FOLDER[] = "game:\\check";
+static const char STATE[] = "game:\\check\\state.txt";
+
+// Step 6's starts: the first, which launches launch_target; the one it launches back; the one after the update.
+enum { STAGE_FRESH, STAGE_LAUNCHED, STAGE_UPDATED };
 
 static StoreConfig config = {
 	.ca = "game:\\test-ca2.crt",
@@ -40,6 +52,9 @@ static char site[STORE_URL_BYTES];
 static unsigned passed;
 static unsigned failed;
 
+static char lines[MAX_LINES][LINE_BYTES];
+static unsigned line_count;
+
 static void check(const char *name, bool good)
 {
 	xsdk_log_write("%s: %s", good ? "PASS" : "FAIL", name);
@@ -47,6 +62,45 @@ static void check(const char *name, bool good)
 		passed++;
 	else
 		failed++;
+	if (line_count < MAX_LINES)
+		snprintf(lines[line_count++], LINE_BYTES, "%s: %s", good ? "PASS" : "FAIL", name);
+}
+
+// A launch ends the title, so the stage, when it was written and the checks so far go in STATE, and the next start
+// logs them again. One older than a launch back takes is from a run that never came back, as is one saying launched
+// when no launch data came: launch_target always sends it.
+static int read_state(size_t back_bytes)
+{
+	FILE *const file = fopen(STATE, "r");
+	if (!file)
+		return STAGE_FRESH;
+	int stage = STAGE_FRESH;
+	long long written = 0;
+	char line[LINE_BYTES];
+	const bool read = fscanf(file, "%d %lld\n", &stage, &written) == 2;
+	const long long age_s = (long long)time(NULL) - written;
+	const bool fresh = read && age_s >= 0 && age_s <= RETURN_WINDOW_S && (stage != STAGE_LAUNCHED || back_bytes != 0);
+	while (fresh && fgets(line, sizeof line, file)) {
+		line[strcspn(line, "\r\n")] = '\0';
+		if (strlen(line) > 6)
+			check(line + 6, strncmp(line, "PASS: ", 6) == 0);
+	}
+	fclose(file);
+	remove(STATE);
+	if (!fresh)
+		xsdk_log_write("store check: %s is from a run %lld s ago that never came back; starting afresh", STATE, age_s);
+	return fresh ? stage : STAGE_FRESH;
+}
+
+static bool write_state(int stage)
+{
+	FILE *const file = fopen(STATE, "w");
+	if (!file)
+		return false;
+	fprintf(file, "%d %lld\n", stage, (long long)time(NULL));
+	for (unsigned i = 0; i < line_count; i++)
+		fprintf(file, "%s\n", lines[i]);
+	return fclose(file) == 0;
 }
 
 static bool read_host(void)
@@ -354,18 +408,105 @@ static void check_install(void)
 	forget_kept();
 }
 
+// Step 6: xsdk's launch_target, installed and started with store_check's path, launches it back with that data
+// reversed (xsdk's tests/launch_target.c). Returns only if the launch fails.
+static void launch_out(void)
+{
+	StoreCatalogue catalogue;
+	StoreProgress progress;
+	char why[STORE_WHY_BYTES];
+	char xex[STORE_PATH_BYTES];
+	forget_kept();
+	if (update("launch", &catalogue) != STORE_FRESH) {
+		check("launch: the catalogue holding launch_target", false);
+		return;
+	}
+	const bool ready = install(&catalogue, 0, &progress) && store_app_xex(&config, &catalogue.apps[0], xex, sizeof xex);
+	store_catalogue_free(&catalogue);
+	if (!ready || !write_state(STAGE_LAUNCHED)) {
+		check("launch: launch_target installed, to start", false);
+		return;
+	}
+	xsdk_log_write("store check: launching %s with its own path, %s", xex, store_self_path());
+	store_launch(xex, why, sizeof why);
+	remove(STATE);
+	xsdk_log_write("store check: %s", why);
+	check("launch: launch_target, installed and started with store_check's path, came back with it", false);
+}
+
+static void launch_back(const uint8_t *back, size_t back_bytes)
+{
+	const char *const self = store_self_path();
+	const size_t length = strlen(self);
+	bool reversed = back_bytes == length + 1 && back[0] == '\0';
+	for (size_t i = 0; reversed && i < length; i++)
+		reversed = back[1 + i] == (uint8_t)self[length - 1 - i];
+	xsdk_log_write("store check: started again with %u bytes of launch data", (unsigned)back_bytes);
+	check("launch: launch_target, installed and started with store_check's path, came back with it", reversed);
+}
+
+// store_check updating itself as the store does: its own entry, newer, installed over the .xex it runs from, then
+// started again. Returns only if that fails.
+static void update_self(void)
+{
+	StoreCatalogue catalogue;
+	StoreProgress progress;
+	if (update("selfupdate", &catalogue) != STORE_FRESH) {
+		check("update: the catalogue holding store_check, newer", false);
+		return;
+	}
+	StoreApp *const self = &catalogue.apps[0];
+	store_installed_app(&config, self);
+	xsdk_log_write("store check: %s is itself %d, installed %d", self->id, (int)self->self, (int)self->installed);
+	const bool done = self->self && self->installed == STORE_INSTALLED_OLDER && install(&catalogue, 0, &progress);
+	store_catalogue_free(&catalogue);
+	if (!done || !write_state(STAGE_UPDATED)) {
+		check("update: store_check's own entry, newer, installs over the .xex it runs from", false);
+		return;
+	}
+	(void)xsdk_launch(store_self_path(), NULL, 0);
+	remove(STATE);
+	check("update: store_check, updated, starts again", false);
+}
+
+static void updated(void)
+{
+	uint32_t title_id = 0;
+	uint32_t version = 0;
+	const bool known = store_self(&title_id, &version);
+	check("update: store_check updated itself and started again, the .xex it runs from now the newer one",
+		known && version == NEWER_VERSION && exists("game:\\app.json") && !exists("game:\\store_check.xex.part"));
+}
+
 int main(void)
 {
 	(void)xsdk_splash_show(SPLASH_MS);
-	xsdk_log_write("store check: %s", curl_version());
+	uint32_t version = 0;
+	(void)store_self(&config.self_title_id, &version);
+	uint8_t back[XSDK_LAUNCH_DATA_MAX_BYTES];
+	const size_t back_bytes = xsdk_launch_data(back, sizeof back);
+	xsdk_log_write(
+		"store check: %s, title %08X version %u", curl_version(), (unsigned)config.self_title_id, (unsigned)version);
 	if (!read_host() || curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
 		return 1;
 	mkdir(FOLDER, 0777);
-	forget_kept();
-	check_catalogue();
-	check_shots();
-	check_installed();
-	check_install();
+	// Everything else runs before the launch, as the update brings in store_check built as it should be: a run broken
+	// on purpose has to break before it.
+	const int stage = read_state(back_bytes);
+	if (stage == STAGE_FRESH) {
+		forget_kept();
+		check_catalogue();
+		check_shots();
+		check_installed();
+		check_install();
+		launch_out();
+	}
+	if (stage == STAGE_LAUNCHED)
+		launch_back(back, back_bytes);
+	if (stage != STAGE_UPDATED)
+		update_self();
+	if (stage == STAGE_UPDATED)
+		updated();
 	curl_global_cleanup();
 	xsdk_log_write("tests: %u passed, %u failed", passed, failed);
 	return failed != 0;

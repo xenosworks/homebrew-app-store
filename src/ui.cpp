@@ -114,7 +114,7 @@ const char ELLIPSIS[] = "\xE2\x80\xA6";
 ImFont *regular;
 ImFont *medium;
 ImFont *bold;
-// Where apps install, ui_run's.
+// Where apps install, ui_run's config's.
 const char *apps_folder = "";
 
 struct Shot {
@@ -155,6 +155,9 @@ struct State {
 	size_t busy_app = 0;
 	std::string message;
 	size_t message_app = 0;
+	// What ends the screens: an app to launch, or the store, updated, to start again.
+	UiExit exit = UI_QUIT;
+	size_t exit_app = 0;
 };
 
 State state;
@@ -474,7 +477,14 @@ void draw_page(ImDrawList *draw, float scale, float x, float right, float alpha)
 	const ImVec2 plate_end(right, plate_y + PLATE_HEIGHT * scale);
 	std::string action = std::string("A  ") + action_text(app);
 	ImU32 action_colour = BACKGROUND;
-	if (busy_on(app)) {
+	// The store's own entry, as it runs: nothing to launch.
+	const bool running = app.self && app.installed != STORE_INSTALLED_NONE && app.installed != STORE_INSTALLED_OLDER;
+	if (running && !busy_on(app)) {
+		draw->AddRectFilled(ImVec2(plate_x, plate_y), plate_end, faded(SELECTED, alpha));
+		draw->AddRect(ImVec2(plate_x, plate_y), plate_end, faded(RULE, alpha));
+		action = "Running";
+		action_colour = GREY;
+	} else if (busy_on(app)) {
 		// Under way: the plate dark, filling as it goes.
 		const StoreProgress *const progress = store_worker_progress();
 		const float done = progress->total_bytes ? (float)progress->done_bytes / (float)progress->total_bytes : 0.0f;
@@ -631,7 +641,7 @@ void draw_store(ImDrawList *draw, ImVec2 size)
 	std::string hints = state.level == CATEGORIES ? "A  open     B  quit" : "A  open     B  back";
 	if (state.level == PAGE) {
 		const StoreApp &app = state.catalogue->apps[selected_app()];
-		hints = app.receipt ? "X  remove     B  back" : "B  back";
+		hints = app.receipt && !app.self ? "X  remove     B  back" : "B  back";
 	}
 	draw_text(draw, regular, HINT_SIZE * scale, ImVec2(SAFE_X * scale, (BOTTOM - HINT_SIZE) * scale), DIM, hints);
 	if (state.overlay != NO_OVERLAY)
@@ -796,6 +806,8 @@ void tend_job()
 	if (!result.done)
 		state.message =
 			std::string(result.kind == STORE_JOB_INSTALL ? "Not installed: " : "Not removed: ") + result.why;
+	else if (result.kind == STORE_JOB_INSTALL && app.self)
+		state.exit = UI_RELAUNCH;
 	else if (result.kind == STORE_JOB_INSTALL)
 		state.message = std::string("Installed in ") + apps_folder + app.id;
 	else
@@ -807,13 +819,20 @@ void tend_job()
 	}
 }
 
-// A on an app's page: its install, after the word if it isn't by xenosworks and the store hasn't installed it from
-// that author before. Opening an installed app comes with step 6.
+// A on an app's page: launching it if it's installed, its install if not, after the word if it isn't by xenosworks
+// and the store hasn't installed it from that author before. The store's own entry, running, does nothing.
 void act(size_t index)
 {
 	const StoreApp &app = state.catalogue->apps[index];
-	if (state.busy || (app.installed != STORE_INSTALLED_NONE && app.installed != STORE_INSTALLED_OLDER))
+	if (state.busy)
 		return;
+	if (app.installed != STORE_INSTALLED_NONE && app.installed != STORE_INSTALLED_OLDER) {
+		if (!app.self) {
+			state.exit = UI_LAUNCH;
+			state.exit_app = index;
+		}
+		return;
+	}
 	if (strcasecmp(app.author, "xenosworks") != 0 && !(app.receipt && app.receipt_author_same)) {
 		state.overlay = WARNING;
 		state.overlay_app = index;
@@ -884,9 +903,9 @@ void ui_close(void)
 	ImGui::DestroyContext();
 }
 
-void ui_run(uint32_t width, uint32_t height, const char *apps, bool shots)
+UiExit ui_run(uint32_t width, uint32_t height, const StoreConfig *config, bool shots, char *xex, size_t xex_bytes)
 {
-	apps_folder = apps;
+	apps_folder = config->apps;
 	size_t step = 0;
 	uint32_t settled_frames = 0;
 	for (;; state.frame++) {
@@ -921,7 +940,7 @@ void ui_run(uint32_t width, uint32_t height, const char *apps, bool shots)
 			}
 			if (back) {
 				ImGui::EndFrame();
-				return;
+				return UI_QUIT;
 			}
 		} else if (usable && state.transition == TRANSITION_FRAMES) {
 			if (state.level == CATEGORIES) {
@@ -942,7 +961,7 @@ void ui_run(uint32_t width, uint32_t height, const char *apps, bool shots)
 				else if (open)
 					go(PAGE);
 				if (state.level == PAGE && pressed(ImGuiKey_GamepadFaceLeft) && !state.busy &&
-					state.catalogue->apps[selected_app()].receipt) {
+					state.catalogue->apps[selected_app()].receipt && !state.catalogue->apps[selected_app()].self) {
 					state.overlay = REMOVAL;
 					state.overlay_app = selected_app();
 				}
@@ -950,13 +969,13 @@ void ui_run(uint32_t width, uint32_t height, const char *apps, bool shots)
 			if (back) {
 				if (state.level == CATEGORIES) {
 					ImGui::EndFrame();
-					return;
+					return UI_QUIT;
 				}
 				go(state.level == PAGE ? APPS : CATEGORIES);
 			}
 		} else if (!state.catalogue && back) {
 			ImGui::EndFrame();
-			return;
+			return UI_QUIT;
 		}
 		if (state.transition < TRANSITION_FRAMES)
 			state.transition++;
@@ -966,6 +985,11 @@ void ui_run(uint32_t width, uint32_t height, const char *apps, bool shots)
 		draw_store(ImGui::GetBackgroundDrawList(), ImVec2((float)width, (float)height));
 		ImGui::Render();
 		if (!present(width, height, shot) || (shots && step == IM_ARRAYSIZE(SHOT_STEPS) && shot))
-			return;
+			return UI_QUIT;
+		if (state.exit == UI_LAUNCH && store_app_xex(config, &state.catalogue->apps[state.exit_app], xex, xex_bytes))
+			return UI_LAUNCH;
+		if (state.exit == UI_RELAUNCH && snprintf(xex, xex_bytes, "%s", store_self_path()) < (int)xex_bytes)
+			return UI_RELAUNCH;
+		state.exit = UI_QUIT;
 	}
 }

@@ -39,7 +39,8 @@ add_subdirectory("${CURL_XENON_DIR}" curl)
 # tests/breaks.py points STORE_CORE_DIR at a copy with one thing broken on purpose.
 set(STORE_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE PATH "Where the shared C files come from")
 add_library(store_core STATIC "${STORE_CORE_DIR}/catalogue.c" "${STORE_CORE_DIR}/net.c" "${STORE_CORE_DIR}/shots.c"
-	"${STORE_CORE_DIR}/install.c" third_party/cjson/cJSON.c third_party/stb/stb_image.c third_party/miniz/miniz.c)
+	"${STORE_CORE_DIR}/install.c" "${STORE_CORE_DIR}/launch.c" third_party/cjson/cJSON.c third_party/stb/stb_image.c
+	third_party/miniz/miniz.c)
 target_include_directories(store_core PUBLIC src third_party/cjson third_party/stb third_party/miniz
 	"${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(store_core PUBLIC STBI_ONLY_PNG STBI_ONLY_JPEG STBI_NO_STDIO STBI_NO_LINEAR
@@ -51,7 +52,7 @@ target_compile_definitions(store_core PUBLIC MINIZ_NO_STDIO MINIZ_NO_TIME MINIZ_
 target_link_libraries(store_core PUBLIC CURL::libcurl mbedtls)
 set(warnings -Wall -Wextra -Werror)
 set_source_files_properties("${STORE_CORE_DIR}/catalogue.c" "${STORE_CORE_DIR}/net.c" "${STORE_CORE_DIR}/shots.c"
-	"${STORE_CORE_DIR}/install.c" src/main.c src/worker.c src/ui.cpp tests/store_check.c
+	"${STORE_CORE_DIR}/install.c" "${STORE_CORE_DIR}/launch.c" src/main.c src/worker.c src/ui.cpp tests/store_check.c
 	PROPERTIES COMPILE_OPTIONS "${warnings}")
 
 # Dear ImGui, from imgui-xenon (its docs/README-xsdk.md).
@@ -71,10 +72,19 @@ list(TRANSFORM fonts PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/")
 set_source_files_properties(src/fonts.S PROPERTIES COMPILE_OPTIONS "-Wa,-I${CMAKE_CURRENT_SOURCE_DIR}/src"
 	OBJECT_DEPENDS "${fonts}")
 xsdk_add_xex(homebrew_app_store TITLE_ID 0x58534153 NAME "Homebrew App Store" VERSION 0.1.0.0)
+# The same, newer, for tests/make_site.py's selfstore/, which the store updates itself to.
+add_executable(homebrew_app_store_v2 src/main.c src/worker.c src/ui.cpp src/fonts.S)
+target_link_libraries(homebrew_app_store_v2 PRIVATE store_core imgui)
+target_compile_features(homebrew_app_store_v2 PRIVATE cxx_std_23)
+xsdk_add_xex(homebrew_app_store_v2 TITLE_ID 0x58534153 NAME "Homebrew App Store" VERSION 0.2.0.0)
 
 add_executable(store_check tests/store_check.c)
 target_link_libraries(store_check PRIVATE store_core)
-xsdk_add_xex(store_check TITLE_ID 0x58534143 NAME "store_check")
+xsdk_add_xex(store_check TITLE_ID 0x58534143 NAME "store_check" VERSION 0.0.0.1)
+# The same, newer, which tests/make_site.py puts in the catalogue for store_check to update itself to.
+add_executable(store_check_v2 tests/store_check.c)
+target_link_libraries(store_check_v2 PRIVATE store_core)
+xsdk_add_xex(store_check_v2 TITLE_ID 0x58534143 NAME "store_check" VERSION 0.0.0.2)
 
 # Beside the titles: Mozilla's roots, as mbedtls-xenon's checks have them, and Mbed TLS's test CA, which
 # xsdk's tools/net_http.py's certificate for localhost is under.

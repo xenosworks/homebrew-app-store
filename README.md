@@ -6,9 +6,9 @@ An Xbox 360 title for finding, installing and updating homebrew, built on
 homebrew can be listed there by pull request, and the store marks what isn't by xenosworks. The plan is xsdk's
 docs/scope/63-homebrew-store.md.
 
-The store shows the catalogue, its categories, each category's apps with their screenshots and each app's page, and
-installs, updates and removes apps in `hdd:\apps\<id>`. Before an app not by xenosworks first installs, it says so and
-waits for A. Launching apps from the store comes next.
+The store shows the catalogue, its categories, each category's apps with their screenshots and each app's page;
+installs, updates, removes and launches apps in `hdd:\apps\<id>`; and updates itself. Before an app not by xenosworks
+first installs, it says so and waits for A.
 
 ## How it trusts what it shows
 
@@ -29,6 +29,20 @@ waits for A. Launching apps from the store comes next.
   finished if it had.
 - An update replaces the files `app.json` lists and deletes the ones the new version drops; a removal deletes them, and
   then offers to delete what the app made itself, its saves and settings, which otherwise stay.
+- The store finds its own entry in the catalogue by its title ID. That entry installs in the store's own folder, over
+  the `.xex` it's running from, which the console allows, and then the store starts itself again.
+
+## Coming back to the store
+
+The store starts an app with xsdk's `xsdk_launch`, its launch data the store's own path, ended by a 0. An app that
+offers a way back reads it and launches it:
+
+```c
+char store[XSDK_LAUNCH_DATA_MAX_BYTES];
+const size_t size = xsdk_launch_data(store, sizeof store);
+if (size && memchr(store, '\0', size))
+	xsdk_launch(store, NULL, 0);
+```
 
 ## Building
 
@@ -51,12 +65,21 @@ default: a store trusts only the key it's built with.
 
 ```bash
 python3 tests/make_site.py build/test
+```
+
+Build with `-DSTORE_PUBLIC_KEY=build/test/keys/test.pub.pem`, then write the site again with the builds it serves:
+xsdk's `launch_target.xex`, which launches back what started it, and the newer store_check and store:
+
+```bash
+python3 tests/make_site.py build/test --launch-target <xsdk>/build/launch_target.xex \
+    --self-update build/store_check_v2.xex --store-update build/homebrew_app_store_v2.xex
 python3 <xsdk>/tools/net_http.py --site build/test/site
 ```
 
-Build with `-DSTORE_PUBLIC_KEY=build/test/keys/test.pub.pem`, then put `store_check.xex`, `test-ca2.crt` and
+Put `store_check.xex`, `test-ca2.crt` and
 `net_http.txt`, holding the PC's address and port as `192.168.0.125 7380`, in a folder on the console and start it.
-Its log, `store_check.log`, ends with a count of its checks passed and failed. `tests/breaks.py` builds it broken on
+It runs its checks, installs and launches launch_target, which launches it back, then updates itself and starts again;
+its log, `store_check.log`, ends with a count of its checks passed and failed. `tests/breaks.py` builds it broken on
 purpose, a case at a time, each of which fails the checks it names.
 
 The store itself takes a `store.txt` beside it for the same site: `url=https://localhost:7381/site/good/catalogue.json`,

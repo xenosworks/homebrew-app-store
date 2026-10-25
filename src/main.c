@@ -3,6 +3,7 @@
 // address, the roots TLS checks against and a host:port:address for curl, apps= for a folder beside the .xex to install
 // apps in, and shots=1 to go through the screens and write each (ui.h).
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -16,6 +17,7 @@
 #include "xsdk/log.h"
 #include "xsdk/present.h"
 #include "xsdk/splash.h"
+#include "xsdk/xam.h"
 
 enum {
 	SPLASH_MS = 2000,
@@ -66,6 +68,19 @@ static void read_config(void)
 int main(void)
 {
 	read_config();
+	uint32_t version = 0;
+	if (!store_self(&config.self_title_id, &version))
+		xsdk_log_write("store: its own .xex can't be read, so its entry in the catalogue isn't known");
+	char back[XSDK_LAUNCH_DATA_MAX_BYTES];
+	const size_t back_bytes = xsdk_launch_data(back, sizeof back);
+	xsdk_log_write("store: %s, title %08X version %u.%u.%u.%u%s", store_self_path(), (unsigned)config.self_title_id,
+		(unsigned)(version >> 28), (unsigned)(version >> 24 & 0xF), (unsigned)(version >> 8 & 0xFFFF),
+		(unsigned)(version & 0xFF), back_bytes ? ", started again with launch data, as an app came back" : "");
+	// shots goes through the screens from a fresh start; started back by an app it launched, it would launch it again.
+	if (shots && back_bytes) {
+		shots = false;
+		xsdk_log_write("store: started back by an app, so not going through the screens by itself");
+	}
 	const NTSTATUS splash = xsdk_splash_show(SPLASH_MS);
 	if (!NT_SUCCESS(splash))
 		xsdk_log_write("store: xsdk_splash_show failed: 0x%08X", (unsigned)splash);
@@ -87,9 +102,23 @@ int main(void)
 	} else {
 		if (ui_open()) {
 			if (store_worker_start(&config)) {
-				ui_run(width, height, config.apps, shots);
+				char xex[STORE_PATH_BYTES];
+				const UiExit exit = ui_run(width, height, &config, shots, xex, sizeof xex);
+				// Nothing else runs as a launch ends the store.
 				store_worker_stop();
 				result = 0;
+				char why[STORE_WHY_BYTES];
+				if (exit == UI_LAUNCH) {
+					xsdk_log_write("store: launching %s", xex);
+					store_launch(xex, why, sizeof why);
+					xsdk_log_write("store: %s", why);
+					result = 1;
+				} else if (exit == UI_RELAUNCH) {
+					xsdk_log_write("store: updated; starting %s again", xex);
+					(void)xsdk_launch(xex, NULL, 0);
+					xsdk_log_write("store: xsdk_launch(%s) failed: errno %d", xex, errno);
+					result = 1;
+				}
 			} else {
 				xsdk_log_write("store: the worker's thread didn't start");
 			}

@@ -35,6 +35,9 @@ typedef struct {
 	// Where the store keeps the catalogue and screenshots, and where apps install, each ending in a backslash.
 	char folder[STORE_PATH_BYTES];
 	char apps[STORE_PATH_BYTES];
+	// The running title's ID, from its own .xex: the catalogue's entry with it is the running title itself, which
+	// installs in its own folder, game:, and updates by replacing its own .xex.
+	uint32_t self_title_id;
 } StoreConfig;
 
 typedef enum {
@@ -77,6 +80,8 @@ typedef struct {
 	// Whether app.json is in the app's folder, the store having installed it, and whether it names the same author.
 	bool receipt;
 	bool receipt_author_same;
+	// The running title itself.
+	bool self;
 } StoreApp;
 
 typedef struct {
@@ -138,6 +143,9 @@ void store_installed(const StoreConfig *config, StoreCatalogue *catalogue);
 void store_installed_app(const StoreConfig *config, StoreApp *app);
 // Whether path is one inside an app's folder, with / between its names, each a name FATX takes with .part after it.
 bool store_path_ok(const char *path);
+// The folder an app installs in, config->apps and its id or, for the running title itself, game:; and its .xex there.
+bool store_app_folder(const StoreConfig *config, const StoreApp *app, char *folder, size_t folder_bytes);
+bool store_app_xex(const StoreConfig *config, const StoreApp *app, char *path, size_t path_bytes);
 // The title ID and version in a .xex's execution info; false if it hasn't one.
 bool store_xex_identity(const uint8_t *data, size_t size, uint32_t *title_id, uint32_t *version);
 // Writes data to path through path.part, fsync and a rename over path.
@@ -168,6 +176,16 @@ bool store_download_path(const StoreConfig *config, const StoreApp *app, char *p
 // As the store starts: in each app's folder, finishes an install app.json.part says was checked, and takes back the
 // .part files of one app.json.pending says wasn't.
 void store_recover(const StoreConfig *config);
+
+// launch.c (step 6).
+// The running title's ID and version, from its own .xex beside it; false if that can't be read.
+bool store_self(uint32_t *title_id, uint32_t *version);
+// The path the loader started the running title from, as xsdk_launch takes it back.
+const char *store_self_path(void);
+// Starts an installed app's .xex, from store_app_xex, with the store's own path, ended by its 0, as its launch data,
+// so the app can come back with xsdk_launch_data() and xsdk_launch(); ends the store, and returns only if it can't,
+// why filled. Nothing else may be running then: the store's worker stopped first.
+bool store_launch(const char *xex, char *why, size_t why_bytes);
 
 #ifdef __cplusplus
 }

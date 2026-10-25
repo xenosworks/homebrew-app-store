@@ -39,11 +39,6 @@ static bool join(char *out, size_t out_bytes, const char *dir, const char *path)
 	return true;
 }
 
-static bool app_folder(const StoreConfig *config, const StoreApp *app, char *folder, size_t folder_bytes)
-{
-	return snprintf(folder, folder_bytes, "%s%s", config->apps, app->id) < (int)folder_bytes;
-}
-
 // The folders above a file inside folder.
 static void make_parents(const char *folder, const char *path)
 {
@@ -262,7 +257,7 @@ bool store_install(const StoreConfig *config, const StoreCatalogue *catalogue, c
 	char part[STORE_PATH_BYTES];
 	char pending[STORE_PATH_BYTES];
 	char checked[STORE_PATH_BYTES];
-	if (!app_folder(config, app, folder, sizeof folder) || !join(pending, sizeof pending, folder, PENDING) ||
+	if (!store_app_folder(config, app, folder, sizeof folder) || !join(pending, sizeof pending, folder, PENDING) ||
 		!join(checked, sizeof checked, folder, CHECKED) ||
 		snprintf(downloads, sizeof downloads, "%sdownloads", config->folder) >= (int)sizeof downloads ||
 		!store_download_path(config, app, part, sizeof part)) {
@@ -406,7 +401,7 @@ static size_t count_others(const char *path, const char *prefix, const cJSON *fi
 size_t store_other_files(const StoreConfig *config, const StoreApp *app)
 {
 	char folder[STORE_PATH_BYTES];
-	if (!app_folder(config, app, folder, sizeof folder))
+	if (!store_app_folder(config, app, folder, sizeof folder))
 		return 0;
 	cJSON *const receipt = read_receipt(folder, RECEIPT);
 	const size_t others = count_others(folder, "", cJSON_GetObjectItemCaseSensitive(receipt, "files"));
@@ -418,7 +413,7 @@ bool store_remove(const StoreConfig *config, const StoreApp *app, bool everythin
 {
 	char folder[STORE_PATH_BYTES];
 	char path[STORE_PATH_BYTES];
-	if (!app_folder(config, app, folder, sizeof folder)) {
+	if (!store_app_folder(config, app, folder, sizeof folder)) {
 		snprintf(why, why_bytes, "%s's folder is too long", app->id);
 		return false;
 	}
@@ -443,6 +438,25 @@ bool store_remove(const StoreConfig *config, const StoreApp *app, bool everythin
 	return true;
 }
 
+static void recover_folder(const char *folder)
+{
+	char pending[STORE_PATH_BYTES];
+	if (!join(pending, sizeof pending, folder, PENDING))
+		return;
+	cJSON *receipt = read_receipt(folder, CHECKED);
+	if (receipt) {
+		const bool finished = finish(folder, cJSON_GetObjectItemCaseSensitive(receipt, "files"));
+		remove(pending);
+		xsdk_log_write("store: %s: an install cut after its files were checked %s", folder,
+			finished ? "is finished" : "still couldn't be finished");
+	} else if ((receipt = read_receipt(folder, PENDING))) {
+		remove_parts(folder, cJSON_GetObjectItemCaseSensitive(receipt, "files"));
+		remove(pending);
+		xsdk_log_write("store: %s: an install cut before its files were checked is taken back", folder);
+	}
+	cJSON_Delete(receipt);
+}
+
 void store_recover(const StoreConfig *config)
 {
 	char apps[STORE_PATH_BYTES];
@@ -451,22 +465,10 @@ void store_recover(const StoreConfig *config)
 	const size_t count = names ? list_folder(apps, names, MAX_NAMES) : 0;
 	for (size_t i = 0; i < count; i++) {
 		char folder[STORE_PATH_BYTES];
-		char pending[STORE_PATH_BYTES];
-		if (snprintf(folder, sizeof folder, "%s\\%s", apps, names[i]) >= (int)sizeof folder ||
-			!join(pending, sizeof pending, folder, PENDING))
-			continue;
-		cJSON *receipt = read_receipt(folder, CHECKED);
-		if (receipt) {
-			const bool finished = finish(folder, cJSON_GetObjectItemCaseSensitive(receipt, "files"));
-			remove(pending);
-			xsdk_log_write("store: %s: an install cut after its files were checked %s", folder,
-				finished ? "is finished" : "still couldn't be finished");
-		} else if ((receipt = read_receipt(folder, PENDING))) {
-			remove_parts(folder, cJSON_GetObjectItemCaseSensitive(receipt, "files"));
-			remove(pending);
-			xsdk_log_write("store: %s: an install cut before its files were checked is taken back", folder);
-		}
-		cJSON_Delete(receipt);
+		if (snprintf(folder, sizeof folder, "%s\\%s", apps, names[i]) < (int)sizeof folder)
+			recover_folder(folder);
 	}
 	free(names);
+	// The running title's own folder, where it updates itself.
+	recover_folder("game:");
 }

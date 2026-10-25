@@ -32,7 +32,8 @@ CASES = {
     "package_hash_unchecked": ("install.c", "memcmp(hash, app->package_sha256, sizeof hash) != 0",
                                "memcmp(hash, app->package_sha256, 0) != 0", "a package that isn't the signed one"),
     "file_hash_unchecked": ("install.c", "if (strcmp(hex, sha256) != 0) {",
-                            "if (strcmp(hex, sha256) != 0 && false) {", "a file that isn't the one the catalogue signed"),
+                            "if (strcmp(hex, sha256) != 0 && false) {",
+                            "a file that isn't the one the catalogue signed"),
     "dropped_file_kept": ("install.c", "if (!listed(app->files, file_path(file)) &&",
                           "if (!listed(app->files, file_path(file)) && false &&",
                           "update; remove, as the dropped file is still there"),
@@ -40,11 +41,20 @@ CASES = {
                          "remove: deletes app.json's files and app.json"),
     "resume_ignored": ("net.c", "download.start = fgetc(kept) == EOF ? read : 0;",
                        "download.start = (fgetc(kept) == EOF ? read : 0) * 0;", "a cut one is taken up"),
-    "pending_kept": ("install.c", "\t\t\tremove_parts(folder, cJSON_GetObjectItemCaseSensitive(receipt, \"files\"));\n",
-                     "", "cut before its files were checked"),
+    "pending_kept": ("install.c",
+                     "\t\tremove_parts(folder, cJSON_GetObjectItemCaseSensitive(receipt, \"files\"));\n", "",
+                     "cut before its files were checked"),
     "checked_unfinished": ("install.c",
-                           "const bool finished = finish(folder, cJSON_GetObjectItemCaseSensitive(receipt, \"files\"));",
-                           "const bool finished = false;", "cut after its files were checked"),
+                           "const bool finished = finish(folder, cJSON_GetObjectItemCaseSensitive(receipt, "
+                           "\"files\"));", "const bool finished = false;", "cut after its files were checked"),
+    "self_unknown": ("catalogue.c", "app->self = config->self_title_id && app->title_id == config->self_title_id;",
+                     "app->self = false;", "store_check's own entry, newer, installs over the .xex it runs from"),
+    "self_folder_ignored": ("catalogue.c", "\tif (app->self)\n", "\tif (app->self && false)\n",
+                            "store_check's own entry, newer, installs over the .xex it runs from"),
+    # Without its data launch_target can't come back, so this one's run ends there: no tests line, and launch_target's
+    # log saying the path to go back to is missing.
+    "launch_data_dropped": ("launch.c", "xsdk_launch(xex, self, strlen(self) + 1);", "xsdk_launch(xex, self, 0);",
+                            "launch_target coming back: the run ends at launch_target"),
 }
 
 
