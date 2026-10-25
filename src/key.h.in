@@ -1,0 +1,7 @@
+// The catalogue's public key and its first address, from the build's STORE_PUBLIC_KEY and STORE_CATALOGUE_URL
+// (CMakeLists.txt). Written by CMake.
+
+#pragma once
+
+#define STORE_PUBLIC_KEY_PEM "@STORE_PUBLIC_KEY_PEM@"
+#define STORE_DEFAULT_URL "@STORE_CATALOGUE_URL@"
