@@ -23,10 +23,18 @@ static struct {
 	bool shot_done;
 	size_t done;
 	uint32_t *done_pixels;
+	bool job_wanted;
+	bool job_running;
+	bool job_done;
+	StoreJobKind job_kind;
+	size_t job_app;
+	StoreJobResult result;
+	StoreProgress progress;
 } worker;
 
 static const char *const SOURCES[] = { "fetched", "kept, as fetching failed", "kept, as what came was refused",
 	"none" };
+static const char *const JOBS[] = { "install", "removal", "removal with what it made" };
 
 static void update(void)
 {
@@ -45,12 +53,38 @@ static void update(void)
 	pthread_mutex_unlock(&worker.lock);
 }
 
+// Runs a job on a copy of the app's entry, whose installed state it then reads afresh: the screens' thread alone writes
+// the catalogue's.
+static void run_job(StoreJobKind kind, size_t index)
+{
+	StoreJobResult result = { .kind = kind, .app = index };
+	StoreApp app = worker.catalogue.apps[index];
+	if (kind == STORE_JOB_INSTALL)
+		result.done =
+			store_install(worker.config, &worker.catalogue, &app, &worker.progress, result.why, sizeof result.why);
+	else
+		result.done = store_remove(worker.config, &app, kind == STORE_JOB_REMOVE_ALL, result.why, sizeof result.why);
+	store_installed_app(worker.config, &app);
+	result.installed = app.installed;
+	result.installed_version = app.installed_version;
+	result.receipt = app.receipt;
+	result.receipt_author_same = app.receipt_author_same;
+	result.other_files = store_other_files(worker.config, &app);
+	xsdk_log_write("store: %s's %s: %s%s", app.id, JOBS[kind], result.done ? "done" : "failed: ", result.why);
+	pthread_mutex_lock(&worker.lock);
+	worker.result = result;
+	worker.job_done = true;
+	worker.job_running = false;
+	pthread_mutex_unlock(&worker.lock);
+}
+
 static void *run(void *unused)
 {
 	(void)unused;
+	store_recover(worker.config);
 	pthread_mutex_lock(&worker.lock);
 	for (;;) {
-		while (!worker.stop && !worker.update && !(worker.shot_wanted && !worker.shot_done))
+		while (!worker.stop && !worker.update && !worker.job_wanted && !(worker.shot_wanted && !worker.shot_done))
 			pthread_cond_wait(&worker.wake, &worker.lock);
 		if (worker.stop)
 			break;
@@ -58,6 +92,15 @@ static void *run(void *unused)
 			worker.update = false;
 			pthread_mutex_unlock(&worker.lock);
 			update();
+			pthread_mutex_lock(&worker.lock);
+			continue;
+		}
+		if (worker.job_wanted) {
+			worker.job_wanted = false;
+			const StoreJobKind kind = worker.job_kind;
+			const size_t app = worker.job_app;
+			pthread_mutex_unlock(&worker.lock);
+			run_job(kind, app);
 			pthread_mutex_lock(&worker.lock);
 			continue;
 		}
@@ -100,7 +143,7 @@ void store_worker_stop(void)
 	pthread_mutex_destroy(&worker.lock);
 }
 
-bool store_worker_catalogue(const StoreCatalogue **catalogue, StoreSource *source, const char **why)
+bool store_worker_catalogue(StoreCatalogue **catalogue, StoreSource *source, const char **why)
 {
 	pthread_mutex_lock(&worker.lock);
 	const bool in = worker.catalogue_in;
@@ -139,6 +182,50 @@ bool store_worker_take_shot(size_t *app, uint32_t **pixels)
 		worker.done_pixels = NULL;
 		worker.shot_done = false;
 		pthread_cond_signal(&worker.wake);
+	}
+	pthread_mutex_unlock(&worker.lock);
+	return done;
+}
+
+bool store_worker_job(StoreJobKind kind, size_t app)
+{
+	pthread_mutex_lock(&worker.lock);
+	const bool free_to_start = !worker.job_wanted && !worker.job_running && !worker.job_done;
+	if (free_to_start) {
+		worker.job_wanted = true;
+		worker.job_running = true;
+		worker.job_kind = kind;
+		worker.job_app = app;
+		worker.progress.step = kind == STORE_JOB_INSTALL ? STORE_STEP_DOWNLOADING : STORE_STEP_REMOVING;
+		worker.progress.done_bytes = 0;
+		worker.progress.total_bytes = 0;
+		pthread_cond_signal(&worker.wake);
+	}
+	pthread_mutex_unlock(&worker.lock);
+	return free_to_start;
+}
+
+bool store_worker_busy(size_t *app)
+{
+	pthread_mutex_lock(&worker.lock);
+	const bool busy = worker.job_running;
+	*app = worker.job_app;
+	pthread_mutex_unlock(&worker.lock);
+	return busy;
+}
+
+const StoreProgress *store_worker_progress(void)
+{
+	return &worker.progress;
+}
+
+bool store_worker_take_job(StoreJobResult *result)
+{
+	pthread_mutex_lock(&worker.lock);
+	const bool done = worker.job_done;
+	if (done) {
+		*result = worker.result;
+		worker.job_done = false;
 	}
 	pthread_mutex_unlock(&worker.lock);
 	return done;

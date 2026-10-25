@@ -29,6 +29,22 @@ CASES = {
                       "the kept one comes back"),
     "title_id_ignored": ("catalogue.c", "title_id == app->title_id)", "(title_id == app->title_id || true))",
                          "another title ID"),
+    "package_hash_unchecked": ("install.c", "memcmp(hash, app->package_sha256, sizeof hash) != 0",
+                               "memcmp(hash, app->package_sha256, 0) != 0", "a package that isn't the signed one"),
+    "file_hash_unchecked": ("install.c", "if (strcmp(hex, sha256) != 0) {",
+                            "if (strcmp(hex, sha256) != 0 && false) {", "a file that isn't the one the catalogue signed"),
+    "dropped_file_kept": ("install.c", "if (!listed(app->files, file_path(file)) &&",
+                          "if (!listed(app->files, file_path(file)) && false &&",
+                          "update; remove, as the dropped file is still there"),
+    "remove_takes_all": ("install.c", "\tif (everything)\n\t\tdelete_tree(folder);", "\tdelete_tree(folder);",
+                         "remove: deletes app.json's files and app.json"),
+    "resume_ignored": ("net.c", "download.start = fgetc(kept) == EOF ? read : 0;",
+                       "download.start = (fgetc(kept) == EOF ? read : 0) * 0;", "a cut one is taken up"),
+    "pending_kept": ("install.c", "\t\t\tremove_parts(folder, cJSON_GetObjectItemCaseSensitive(receipt, \"files\"));\n",
+                     "", "cut before its files were checked"),
+    "checked_unfinished": ("install.c",
+                           "const bool finished = finish(folder, cJSON_GetObjectItemCaseSensitive(receipt, \"files\"));",
+                           "const bool finished = false;", "cut after its files were checked"),
 }
 
 

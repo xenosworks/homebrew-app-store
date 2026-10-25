@@ -34,19 +34,25 @@ set(MBEDCRYPTO_LIBRARY mbedcrypto CACHE STRING "")
 set(CURL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
 add_subdirectory("${CURL_XENON_DIR}" curl)
 
-# What the store and store_check share: the catalogue, screenshots and fetching, with cJSON 1.7.19 and stb_image 2.30
-# as upstream ships them, stb_image for PNG and JPEG alone.
+# What the store and store_check share: the catalogue, screenshots, fetching and installing, with cJSON 1.7.19,
+# stb_image 2.30 and miniz 3.1.2 as upstream ships them, stb_image for PNG and JPEG alone.
 # tests/breaks.py points STORE_CORE_DIR at a copy with one thing broken on purpose.
-set(STORE_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE PATH "Where catalogue.c, net.c and shots.c come from")
+set(STORE_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE PATH "Where the shared C files come from")
 add_library(store_core STATIC "${STORE_CORE_DIR}/catalogue.c" "${STORE_CORE_DIR}/net.c" "${STORE_CORE_DIR}/shots.c"
-	third_party/cjson/cJSON.c third_party/stb/stb_image.c)
-target_include_directories(store_core PUBLIC src third_party/cjson third_party/stb "${CMAKE_CURRENT_BINARY_DIR}")
+	"${STORE_CORE_DIR}/install.c" third_party/cjson/cJSON.c third_party/stb/stb_image.c third_party/miniz/miniz.c)
+target_include_directories(store_core PUBLIC src third_party/cjson third_party/stb third_party/miniz
+	"${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(store_core PUBLIC STBI_ONLY_PNG STBI_ONLY_JPEG STBI_NO_STDIO STBI_NO_LINEAR
 	STBI_MAX_DIMENSIONS=4096)
+# miniz 3.1.2 for packages: reading zips from memory alone, on a big-endian CPU, its byte order set rather than guessed.
+target_compile_definitions(store_core PUBLIC MINIZ_NO_STDIO MINIZ_NO_TIME MINIZ_NO_ARCHIVE_WRITING_APIS
+	MINIZ_NO_ZLIB_COMPATIBLE_NAMES MINIZ_LITTLE_ENDIAN=0 MINIZ_USE_UNALIGNED_LOADS_AND_STORES=0
+	MINIZ_HAS_64BIT_REGISTERS=0)
 target_link_libraries(store_core PUBLIC CURL::libcurl mbedtls)
 set(warnings -Wall -Wextra -Werror)
 set_source_files_properties("${STORE_CORE_DIR}/catalogue.c" "${STORE_CORE_DIR}/net.c" "${STORE_CORE_DIR}/shots.c"
-	src/main.c src/worker.c src/ui.cpp tests/store_check.c PROPERTIES COMPILE_OPTIONS "${warnings}")
+	"${STORE_CORE_DIR}/install.c" src/main.c src/worker.c src/ui.cpp tests/store_check.c
+	PROPERTIES COMPILE_OPTIONS "${warnings}")
 
 # Dear ImGui, from imgui-xenon (its docs/README-xsdk.md).
 add_library(imgui STATIC "${IMGUI_XENON_DIR}/imgui.cpp" "${IMGUI_XENON_DIR}/imgui_draw.cpp"

@@ -6,8 +6,9 @@ An Xbox 360 title for finding, installing and updating homebrew, built on
 homebrew can be listed there by pull request, and the store marks what isn't by xenosworks. The plan is xsdk's
 docs/scope/63-homebrew-store.md.
 
-So far the store shows the catalogue: its categories, each category's apps with their screenshots, and each app's page,
-with whether it's installed in `hdd:\apps\<id>` and whether an update is ready. Installing comes next.
+The store shows the catalogue, its categories, each category's apps with their screenshots and each app's page, and
+installs, updates and removes apps in `hdd:\apps\<id>`. Before an app not by xenosworks first installs, it says so and
+waits for A. Launching apps from the store comes next.
 
 ## How it trusts what it shows
 
@@ -17,6 +18,17 @@ with whether it's installed in `hdd:\apps\<id>` and whether an update is ready. 
 - It keeps the last catalogue it took on the hard disk, and shows it when the network is down or what comes is refused.
   It refuses a catalogue older than the one it kept, so an old one can't roll apps back, and follows a signed new
   address if the catalogue ever moves.
+
+## How it installs
+
+- A package is a zip. It downloads into memory, a thread of its own putting each piece on the disk as it comes, so a
+  cut download is taken up where it stopped. Its SHA-256 must be the catalogue's before it's opened.
+- Each file is unpacked beside its place as `<name>.part`, its own SHA-256 checked against the catalogue, then renamed
+  into place. `app.json`, the store's record of what it installed, is written first as `app.json.pending` and renamed
+  `app.json.part` once every file checks: a cut install is taken back on the next start if it hadn't got that far, and
+  finished if it had.
+- An update replaces the files `app.json` lists and deletes the ones the new version drops; a removal deletes them, and
+  then offers to delete what the app made itself, its saves and settings, which otherwise stay.
 
 ## Building
 
@@ -48,7 +60,8 @@ Its log, `store_check.log`, ends with a count of its checks passed and failed. `
 purpose, a case at a time, each of which fails the checks it names.
 
 The store itself takes a `store.txt` beside it for the same site: `url=https://localhost:7381/site/good/catalogue.json`,
-`ca=test-ca2.crt` and `resolve=localhost:7381:192.168.0.125`, and `shots=1` to write each screen and end.
+`ca=test-ca2.crt` and `resolve=localhost:7381:192.168.0.125`, `apps=apps` to install in a folder beside it rather than
+`hdd:\apps`, and `shots=1` to go through the screens by itself, writing each, and end.
 
 ## Licence
 

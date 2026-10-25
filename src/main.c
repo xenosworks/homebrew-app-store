@@ -1,9 +1,11 @@
 // The Homebrew App Store (xsdk's docs/scope/63-homebrew-store.md): the splash, then the catalogue's screens until B on
 // the first. store.txt beside the .xex, for checks against a PC, may hold url=, ca= and resolve= for the catalogue's
-// address, the roots TLS checks against and a host:port:address for curl, and shots=1 to write each screen and end.
+// address, the roots TLS checks against and a host:port:address for curl, apps= for a folder beside the .xex to install
+// apps in, and shots=1 to go through the screens and write each (ui.h).
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <curl/curl.h>
 
@@ -47,12 +49,18 @@ static void read_config(void)
 			snprintf(config.ca, sizeof config.ca, "game:\\%s", value + 1);
 		else if (!strcmp(line, "resolve"))
 			snprintf(config.resolve, sizeof config.resolve, "%s", value + 1);
-		else if (!strcmp(line, "shots"))
+		else if (!strcmp(line, "apps")) {
+			char folder[STORE_PATH_BYTES];
+			snprintf(folder, sizeof folder, "game:\\%.200s", value + 1);
+			mkdir(folder, 0777);
+			snprintf(config.apps, sizeof config.apps, "%.250s\\", folder);
+		} else if (!strcmp(line, "shots"))
 			shots = value[1] == '1';
 	}
 	fclose(file);
-	xsdk_log_write("store: store.txt: url %s, ca %s, resolve %s%s", config.url[0] ? config.url : "the kept one's",
-		config.ca, config.resolve[0] ? config.resolve : "none", shots ? ", writing each screen" : "");
+	xsdk_log_write("store: store.txt: url %s, ca %s, resolve %s, apps in %s%s",
+		config.url[0] ? config.url : "the kept one's", config.ca, config.resolve[0] ? config.resolve : "none",
+		config.apps, shots ? ", writing each screen" : "");
 }
 
 int main(void)
@@ -79,7 +87,7 @@ int main(void)
 	} else {
 		if (ui_open()) {
 			if (store_worker_start(&config)) {
-				ui_run(width, height, shots);
+				ui_run(width, height, config.apps, shots);
 				store_worker_stop();
 				result = 0;
 			} else {

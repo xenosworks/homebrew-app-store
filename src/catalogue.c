@@ -31,7 +31,12 @@ enum {
 	XEX_HEADER_BYTES = 64 * 1024,
 	// xenia:src/xenia/kernel/util/xex2_info.h:278-308, as xsdk's tools/elf2xex.py writes it.
 	HEADER_EXECUTION_INFO = 0x00040006,
+	MAX_RECEIPT_BYTES = 1024 * 1024,
 };
+
+// shortcut: a package is read into memory whole, so it's held to what the console's memory takes; unpack it from the
+// file if apps that big ever come.
+static const double MAX_PACKAGE_BYTES = 192.0 * 1024 * 1024;
 
 static const char KEPT_NAME[] = "catalogue.kept";
 
@@ -160,8 +165,8 @@ static bool id_ok(const char *id)
 	return true;
 }
 
-// A path inside an app's folder, with / between its names, as store_catalogue.py checks them.
-static bool path_ok(const char *path)
+// As store_catalogue.py checks them.
+bool store_path_ok(const char *path)
 {
 	if (!path || !path[0] || strlen(path) > MAX_PATH_CHARS)
 		return false;
@@ -224,7 +229,7 @@ static bool parse_app(const cJSON *item, StoreCatalogue *catalogue, StoreApp *ap
 	uint8_t title_id_bytes[4];
 	uint64_t version_number;
 	if (!app->name || !app->author || !app->sentence || !app->needs || !app->changes || !app->version || !category ||
-		!path_ok(app->launch) || !ends_with(app->launch, ".xex") || !path_ok(app->screenshot) ||
+		!store_path_ok(app->launch) || !ends_with(app->launch, ".xex") || !store_path_ok(app->screenshot) ||
 		!hex_bytes(text(item, "screenshot_sha256"), app->screenshot_sha256, sizeof app->screenshot_sha256) ||
 		!title_id || !hex_bytes(title_id, title_id_bytes, sizeof title_id_bytes) ||
 		!whole(item, "version_number", UINT32_MAX, &version_number)) {
@@ -239,20 +244,26 @@ static bool parse_app(const cJSON *item, StoreCatalogue *catalogue, StoreApp *ap
 			app->category = i;
 	}
 	const cJSON *const package = cJSON_GetObjectItemCaseSensitive(item, "package");
-	const cJSON *const files = cJSON_GetObjectItemCaseSensitive(item, "files");
-	if (app->category == catalogue->category_count || !whole(package, "size", 1e15, &app->package_bytes) ||
-		!cJSON_IsArray(files)) {
+	app->files = cJSON_GetObjectItemCaseSensitive(item, "files");
+	app->package_url = text(package, "url");
+	if (app->category == catalogue->category_count || !whole(package, "size", MAX_PACKAGE_BYTES, &app->package_bytes) ||
+		!app->package_url || strncmp(app->package_url, "https://", 8) != 0 ||
+		strlen(app->package_url) >= STORE_URL_BYTES ||
+		!hex_bytes(text(package, "sha256"), app->package_sha256, sizeof app->package_sha256) ||
+		!cJSON_IsArray(app->files)) {
 		snprintf(why, why_bytes, "app %s's category, package or files aren't there", id);
 		return false;
 	}
 	bool launched = false;
 	const cJSON *file;
-	cJSON_ArrayForEach(file, files)
+	cJSON_ArrayForEach(file, app->files)
 	{
 		const char *const path = text(file, "path");
+		uint8_t hash[32];
 		uint64_t bytes;
-		if (!path_ok(path) || !whole(file, "size", 1e15, &bytes)) {
-			snprintf(why, why_bytes, "app %s has a file whose path or size isn't one", id);
+		if (!store_path_ok(path) || !whole(file, "size", MAX_PACKAGE_BYTES, &bytes) ||
+			!hex_bytes(text(file, "sha256"), hash, sizeof hash)) {
+			snprintf(why, why_bytes, "app %s has a file whose path, size or SHA-256 isn't one", id);
 			return false;
 		}
 		app->installed_bytes += bytes;
@@ -408,32 +419,49 @@ StoreSource store_catalogue_update(const StoreConfig *config, StoreCatalogue *ca
 	return STORE_NONE;
 }
 
+void store_installed_app(const StoreConfig *config, StoreApp *app)
+{
+	char path[STORE_PATH_BYTES];
+	app->installed = STORE_INSTALLED_NONE;
+	app->receipt = false;
+	app->receipt_author_same = false;
+	if (snprintf(path, sizeof path, "%s%s\\app.json", config->apps, app->id) < (int)sizeof path) {
+		uint8_t *data;
+		size_t size;
+		if (store_read_file(path, MAX_RECEIPT_BYTES, &data, &size)) {
+			cJSON *const receipt = cJSON_ParseWithLength((const char *)data, size);
+			const char *const author = text(receipt, "author");
+			app->receipt = receipt != NULL;
+			app->receipt_author_same = author && strcmp(author, app->author) == 0;
+			cJSON_Delete(receipt);
+			free(data);
+		}
+	}
+	if (snprintf(path, sizeof path, "%s%s\\%s", config->apps, app->id, app->launch) >= (int)sizeof path)
+		return;
+	for (char *c = path; *c; c++) {
+		if (*c == '/')
+			*c = '\\';
+	}
+	FILE *const file = fopen(path, "rb");
+	if (!file)
+		return;
+	uint8_t *const header = malloc(XEX_HEADER_BYTES);
+	const size_t size = header ? fread(header, 1, XEX_HEADER_BYTES, file) : 0;
+	fclose(file);
+	uint32_t title_id;
+	uint32_t version;
+	if (store_xex_identity(header, size, &title_id, &version) && title_id == app->title_id) {
+		app->installed_version = version;
+		app->installed = version == app->version_number ? STORE_INSTALLED_CURRENT
+			: version < app->version_number             ? STORE_INSTALLED_OLDER
+														: STORE_INSTALLED_NEWER;
+	}
+	free(header);
+}
+
 void store_installed(const StoreConfig *config, StoreCatalogue *catalogue)
 {
-	for (size_t i = 0; i < catalogue->app_count; i++) {
-		StoreApp *const app = &catalogue->apps[i];
-		char path[STORE_PATH_BYTES];
-		app->installed = STORE_INSTALLED_NONE;
-		if (snprintf(path, sizeof path, "%s%s\\%s", config->apps, app->id, app->launch) >= (int)sizeof path)
-			continue;
-		for (char *c = path; *c; c++) {
-			if (*c == '/')
-				*c = '\\';
-		}
-		FILE *const file = fopen(path, "rb");
-		if (!file)
-			continue;
-		uint8_t *const header = malloc(XEX_HEADER_BYTES);
-		const size_t size = header ? fread(header, 1, XEX_HEADER_BYTES, file) : 0;
-		fclose(file);
-		uint32_t title_id;
-		uint32_t version;
-		if (store_xex_identity(header, size, &title_id, &version) && title_id == app->title_id) {
-			app->installed_version = version;
-			app->installed = version == app->version_number ? STORE_INSTALLED_CURRENT
-				: version < app->version_number             ? STORE_INSTALLED_OLDER
-															: STORE_INSTALLED_NEWER;
-		}
-		free(header);
-	}
+	for (size_t i = 0; i < catalogue->app_count; i++)
+		store_installed_app(config, &catalogue->apps[i]);
 }

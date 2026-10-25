@@ -213,6 +213,147 @@ static void check_installed(void)
 	store_catalogue_free(&catalogue);
 }
 
+static bool exists(const char *path)
+{
+	struct stat status;
+	return stat(path, &status) == 0;
+}
+
+static bool write_text(const char *path, const char *text)
+{
+	FILE *const file = fopen(path, "wb");
+	const bool written = file && fputs(text, file) >= 0;
+	return file && fclose(file) == 0 && written;
+}
+
+// The app's installed state afresh, its version as installed.
+static StoreInstalled installed(StoreApp *app)
+{
+	store_installed_app(&config, app);
+	return app->installed;
+}
+
+static bool install(StoreCatalogue *catalogue, size_t index, StoreProgress *progress)
+{
+	char why[STORE_WHY_BYTES] = "";
+	memset(progress, 0, sizeof *progress);
+	const bool done = store_install(&config, catalogue, &catalogue->apps[index], progress, why, sizeof why);
+	xsdk_log_write("store check: %s %s installs: %s%s", catalogue->apps[index].id, catalogue->apps[index].version,
+		done ? "done" : "failed: ", why);
+	return done;
+}
+
+// Step 5: install, update and remove alpha, a cut download of beta's, and cut installs recovered.
+static void check_install(void)
+{
+	StoreCatalogue catalogue;
+	StoreProgress progress;
+	char why[STORE_WHY_BYTES];
+	StoreApp gone = { .id = "alpha" };
+	store_remove(&config, &gone, true, why, sizeof why);
+	snprintf(gone.id, sizeof gone.id, "beta");
+	store_remove(&config, &gone, true, why, sizeof why);
+
+	if (update("good", &catalogue) != STORE_FRESH) {
+		check("install: the catalogue to install from", false);
+		return;
+	}
+	bool done = install(&catalogue, 0, &progress);
+	check("install: an app installs its files and app.json, and nothing else",
+		done && exists("game:\\check\\apps\\alpha\\alpha.xex") &&
+			exists("game:\\check\\apps\\alpha\\data\\readme.txt") && exists("game:\\check\\apps\\alpha\\app.json") &&
+			store_other_files(&config, &catalogue.apps[0]) == 0 &&
+			installed(&catalogue.apps[0]) == STORE_INSTALLED_CURRENT && catalogue.apps[0].receipt);
+	store_catalogue_free(&catalogue);
+	// What the app makes itself.
+	write_text("game:\\check\\apps\\alpha\\save.dat", "a save\n");
+
+	update("badupdate", &catalogue);
+	char why_install[STORE_WHY_BYTES] = "";
+	memset(&progress, 0, sizeof progress);
+	done = store_install(&config, &catalogue, &catalogue.apps[0], &progress, why_install, sizeof why_install);
+	xsdk_log_write(
+		"store check: alpha %s installs: %s%s", catalogue.apps[0].version, done ? "done" : "failed: ", why_install);
+	check("install: a package that isn't the signed one is refused, and the version installed stays",
+		!done && strstr(why_install, "isn't the package") && installed(&catalogue.apps[0]) == STORE_INSTALLED_OLDER &&
+			exists("game:\\check\\apps\\alpha\\data\\readme.txt") && exists("game:\\check\\apps\\alpha\\app.json") &&
+			!exists("game:\\check\\apps\\alpha\\alpha.xex.part") &&
+			!exists("game:\\check\\apps\\alpha\\app.json.pending"));
+	store_catalogue_free(&catalogue);
+
+	update("update", &catalogue);
+	done = install(&catalogue, 0, &progress);
+	check("update: replaces the app's files, deletes the one it dropped, and keeps what the app made",
+		done && installed(&catalogue.apps[0]) == STORE_INSTALLED_CURRENT &&
+			exists("game:\\check\\apps\\alpha\\data\\new.txt") &&
+			!exists("game:\\check\\apps\\alpha\\data\\readme.txt") && exists("game:\\check\\apps\\alpha\\save.dat") &&
+			store_other_files(&config, &catalogue.apps[0]) == 1);
+
+	done = store_remove(&config, &catalogue.apps[0], false, why, sizeof why);
+	check("remove: deletes app.json's files and app.json, and leaves what the app made",
+		done && !exists("game:\\check\\apps\\alpha\\alpha.xex") && !exists("game:\\check\\apps\\alpha\\data") &&
+			!exists("game:\\check\\apps\\alpha\\app.json") && exists("game:\\check\\apps\\alpha\\save.dat") &&
+			store_other_files(&config, &catalogue.apps[0]) == 1);
+	done = store_remove(&config, &catalogue.apps[0], true, why, sizeof why);
+	check("remove: with everything, the app's folder goes too", done && !exists("game:\\check\\apps\\alpha"));
+	store_catalogue_free(&catalogue);
+
+	// badfile's, drop's and good's serial is below update's, so what's kept goes first.
+	forget_kept();
+	update("badfile", &catalogue);
+	memset(&progress, 0, sizeof progress);
+	done = store_install(&config, &catalogue, &catalogue.apps[1], &progress, why_install, sizeof why_install);
+	xsdk_log_write("store check: beta from badfile installs: %s%s", done ? "done" : "failed: ", why_install);
+	check("install: a file that isn't the one the catalogue signed is refused, and nothing of it is left",
+		!done && strstr(why_install, "isn't the file") && !exists("game:\\check\\apps\\beta\\app.json") &&
+			!exists("game:\\check\\apps\\beta\\beta.xex") && !exists("game:\\check\\apps\\beta\\beta.xex.part") &&
+			!exists("game:\\check\\apps\\beta\\data\\readme.txt.part") &&
+			!exists("game:\\check\\apps\\beta\\app.json.pending"));
+	store_catalogue_free(&catalogue);
+	forget_kept();
+
+	update("drop", &catalogue);
+	char part[STORE_PATH_BYTES];
+	store_download_path(&config, &catalogue.apps[1], part, sizeof part);
+	remove(part);
+	const uint64_t package_bytes = catalogue.apps[1].package_bytes;
+	const bool cut = !install(&catalogue, 1, &progress) && exists(part);
+	store_catalogue_free(&catalogue);
+	update("good", &catalogue);
+	done = install(&catalogue, 1, &progress);
+	xsdk_log_write("store check: beta's package, %u bytes: %u fetched after the cut", (unsigned)package_bytes,
+		(unsigned)progress.fetched_bytes);
+	check("download: a cut one is taken up where it stopped",
+		cut && done && progress.fetched_bytes > 0 && progress.fetched_bytes < package_bytes && !exists(part) &&
+			installed(&catalogue.apps[1]) == STORE_INSTALLED_CURRENT);
+
+	// A cut before the files were checked: their .part files are taken back.
+	StoreApp *const beta = &catalogue.apps[1];
+	mkdir("game:\\check\\apps\\beta\\data", 0777);
+	const bool laid = write_text("game:\\check\\apps\\beta\\app.json.pending",
+						  "{\"files\": [{\"path\": \"beta.xex\"}, {\"path\": \"data/extra.txt\"}]}") &&
+		write_text("game:\\check\\apps\\beta\\beta.xex.part", "not checked\n") &&
+		write_text("game:\\check\\apps\\beta\\data\\extra.txt.part", "not checked\n");
+	store_recover(&config);
+	check("recover: an install cut before its files were checked is taken back, the installed one left",
+		laid && !exists("game:\\check\\apps\\beta\\beta.xex.part") &&
+			!exists("game:\\check\\apps\\beta\\data\\extra.txt.part") &&
+			!exists("game:\\check\\apps\\beta\\app.json.pending") && installed(beta) == STORE_INSTALLED_CURRENT);
+
+	// A cut after: the checked .part files go into place, and app.json.part becomes app.json.
+	const bool checked = write_text("game:\\check\\apps\\beta\\app.json.part",
+							 "{\"author\": \"Someone Else\", \"files\": [{\"path\": \"beta.xex\"}]}") &&
+		write_xex("beta", "beta.xex.part", beta->title_id, beta->version_number + 1);
+	store_recover(&config);
+	check("recover: an install cut after its files were checked is finished",
+		checked && !exists("game:\\check\\apps\\beta\\beta.xex.part") &&
+			!exists("game:\\check\\apps\\beta\\app.json.part") && installed(beta) == STORE_INSTALLED_NEWER &&
+			beta->receipt);
+	store_remove(&config, beta, true, why, sizeof why);
+	store_catalogue_free(&catalogue);
+	forget_kept();
+}
+
 int main(void)
 {
 	(void)xsdk_splash_show(SPLASH_MS);
@@ -224,6 +365,7 @@ int main(void)
 	check_catalogue();
 	check_shots();
 	check_installed();
+	check_install();
 	curl_global_cleanup();
 	xsdk_log_write("tests: %u passed, %u failed", passed, failed);
 	return failed != 0;

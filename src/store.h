@@ -65,11 +65,18 @@ typedef struct {
 	uint8_t screenshot_sha256[32];
 	uint32_t title_id;
 	uint32_t version_number;
+	const char *package_url;
+	uint8_t package_sha256[32];
 	uint64_t package_bytes;
 	uint64_t installed_bytes;
+	// The entry's files, each {"path", "size", "sha256"}, every path checked.
+	const cJSON *files;
 	size_t category;
 	StoreInstalled installed;
 	uint32_t installed_version;
+	// Whether app.json is in the app's folder, the store having installed it, and whether it names the same author.
+	bool receipt;
+	bool receipt_author_same;
 } StoreApp;
 
 typedef struct {
@@ -92,9 +99,30 @@ typedef enum {
 	STORE_NONE,
 } StoreSource;
 
+// What an install or a removal has done so far, for the screens to show as it runs.
+typedef enum {
+	STORE_STEP_NONE,
+	STORE_STEP_DOWNLOADING,
+	STORE_STEP_INSTALLING,
+	STORE_STEP_REMOVING,
+} StoreStep;
+
+typedef struct {
+	volatile uint32_t step;
+	volatile uint32_t done_bytes;
+	volatile uint32_t total_bytes;
+	// What the download fetched this time, less than the package when it took up a cut one.
+	volatile uint32_t fetched_bytes;
+} StoreProgress;
+
 // net.c: fetches url into memory, up to max_bytes, over HTTPS only. Returns false with why filled when it can't.
 bool store_fetch(const StoreConfig *config, const char *url, size_t max_bytes, uint8_t **data, size_t *size, char *why,
 	size_t why_bytes);
+// Downloads url's size bytes into memory, taking up from where a cut download left part_path, and writes each piece to
+// part_path from a thread of its own as it comes, as writing to the disk as it arrives halves the rate (xsdk's
+// docs/HARDWARE.md, "Milestone 56 on the console"). data is the caller's once all size bytes have come.
+bool store_download(const StoreConfig *config, const char *url, const char *part_path, size_t size, uint8_t **data,
+	StoreProgress *progress, char *why, size_t why_bytes);
 
 // catalogue.c
 // Whether signature is the built-in key's over data's SHA-256.
@@ -105,8 +133,11 @@ void store_catalogue_free(StoreCatalogue *catalogue);
 // Fetches the catalogue and its signature, checks them and keeps them in config->folder; or takes the one kept there
 // when the fetch fails or what came is refused, unsigned, malformed or older than the kept one.
 StoreSource store_catalogue_update(const StoreConfig *config, StoreCatalogue *catalogue, char *why, size_t why_bytes);
-// Fills each app's installed state from the .xex it launches in config->apps.
+// Fills each app's installed state from the .xex it launches in config->apps, and its receipt from app.json there.
 void store_installed(const StoreConfig *config, StoreCatalogue *catalogue);
+void store_installed_app(const StoreConfig *config, StoreApp *app);
+// Whether path is one inside an app's folder, with / between its names, each a name FATX takes with .part after it.
+bool store_path_ok(const char *path);
 // The title ID and version in a .xex's execution info; false if it hasn't one.
 bool store_xex_identity(const uint8_t *data, size_t size, uint32_t *title_id, uint32_t *version);
 // Writes data to path through path.part, fsync and a rename over path.
@@ -119,6 +150,24 @@ bool store_read_file(const char *path, size_t max_bytes, uint8_t **data, size_t 
 // against the catalogue's, decoded, scaled and kept. pixels is the caller's to free.
 bool store_shot(const StoreConfig *config, const StoreCatalogue *catalogue, const StoreApp *app, uint32_t **pixels,
 	char *why, size_t why_bytes);
+
+// install.c (xsdk's docs/scope/63-homebrew-store.md, step 5). An app's folder is config->apps followed by its id.
+// Installs or updates the app: its package downloaded and its SHA-256 checked; app.json.pending written, naming the
+// files; each file unpacked beside its final name as <name>.part and checked against the catalogue; app.json.pending
+// renamed app.json.part; the files renamed into place and app.json.part renamed app.json. Then the files the version
+// before listed and this one doesn't are deleted. False with why filled leaves the installed version as it was.
+bool store_install(const StoreConfig *config, const StoreCatalogue *catalogue, const StoreApp *app,
+	StoreProgress *progress, char *why, size_t why_bytes);
+// Deletes the files app.json lists, then app.json; with everything, the rest of the app's folder too, what the app
+// made.
+bool store_remove(const StoreConfig *config, const StoreApp *app, bool everything, char *why, size_t why_bytes);
+// How many files are in the app's folder beyond what app.json lists.
+size_t store_other_files(const StoreConfig *config, const StoreApp *app);
+// Where the app's package downloads, which a cut download leaves for the next try to take up.
+bool store_download_path(const StoreConfig *config, const StoreApp *app, char *path, size_t path_bytes);
+// As the store starts: in each app's folder, finishes an install app.json.part says was checked, and takes back the
+// .part files of one app.json.pending says wasn't.
+void store_recover(const StoreConfig *config);
 
 #ifdef __cplusplus
 }

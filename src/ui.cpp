@@ -56,6 +56,9 @@ const ImU32 RULE = IM_COL32(0x2A, 0x2A, 0x2C, 0xFF);
 const ImU32 SELECTED = IM_COL32(0x1B, 0x1B, 0x1D, 0xFF);
 const ImU32 WHITE = IM_COL32(0xFF, 0xFF, 0xFF, 0xFF);
 const ImU32 PLACEHOLDER = IM_COL32(0x16, 0x16, 0x18, 0xFF);
+const ImU32 FILL = IM_COL32(0x3A, 0x3A, 0x3E, 0xFF);
+const ImU32 VEIL = IM_COL32(0x00, 0x00, 0x00, 0xB8);
+const ImU32 PANEL = IM_COL32(0x14, 0x14, 0x16, 0xFF);
 
 // The layout in pixels of a 720-line display; every size scales with the display's height. The title-safe area is
 // the middle 90%.
@@ -98,12 +101,21 @@ const float PLATE_HEIGHT = 48.0f;
 const float PLATE_SIZE = 20.0f;
 const float PAGE_SHOT_TOP = 306.0f;
 const float MESSAGE_SIZE = 26.0f;
+const float MESSAGE_LINE_SIZE = 16.0f;
+// The overlay's panel.
+const float OVERLAY_WIDTH = 760.0f;
+const float OVERLAY_PAD = 40.0f;
+const float OVERLAY_TITLE_SIZE = 30.0f;
+const float OVERLAY_BODY_SIZE = 21.0f;
+const float OVERLAY_LINE = 29.0f;
 
 const char ELLIPSIS[] = "\xE2\x80\xA6";
 
 ImFont *regular;
 ImFont *medium;
 ImFont *bold;
+// Where apps install, ui_run's.
+const char *apps_folder = "";
 
 struct Shot {
 	bool used;
@@ -114,8 +126,12 @@ struct Shot {
 	uint32_t shown;
 };
 
+// What's over the screens, waiting for A or B: the word before an app not by xenosworks first installs, a removal to
+// confirm, and the offer to delete what an app made once it's removed.
+enum Overlay { NO_OVERLAY, WARNING, REMOVAL, LEFTOVERS };
+
 struct State {
-	const StoreCatalogue *catalogue = nullptr;
+	StoreCatalogue *catalogue = nullptr;
 	StoreSource source = STORE_NONE;
 	const char *why = "";
 	// Each category's apps, by index into the catalogue.
@@ -131,6 +147,14 @@ struct State {
 	size_t asked_app = 0;
 	Shot shots[SHOT_TEXTURES] = {};
 	uint32_t frame = 0;
+	Overlay overlay = NO_OVERLAY;
+	size_t overlay_app = 0;
+	size_t leftovers = 0;
+	// The job under way, and what the last one said, on its app's page.
+	bool busy = false;
+	size_t busy_app = 0;
+	std::string message;
+	size_t message_app = 0;
 };
 
 State state;
@@ -226,8 +250,15 @@ std::string bytes_text(uint64_t bytes)
 }
 
 // What the list and the panels say of an app's state, and what A does on its page.
+bool busy_on(const StoreApp &app)
+{
+	return state.busy && &app == &state.catalogue->apps[state.busy_app];
+}
+
 std::string state_text(const StoreApp &app)
 {
+	if (busy_on(app))
+		return store_worker_progress()->step == STORE_STEP_REMOVING ? "Removing" : "Installing";
 	switch (app.installed) {
 	case STORE_INSTALLED_CURRENT:
 		return "Installed";
@@ -242,7 +273,9 @@ std::string state_text(const StoreApp &app)
 
 const char *action_text(const StoreApp &app)
 {
-	return app.installed == STORE_INSTALLED_NONE ? "Get" : app.installed == STORE_INSTALLED_OLDER ? "Update" : "Open";
+	return app.installed == STORE_INSTALLED_NONE ? "Install"
+		: app.installed == STORE_INSTALLED_OLDER ? "Update"
+												 : "Launch";
 }
 
 // "By <author>", and that it isn't by xenosworks when it isn't (xsdk's docs/scope/63-homebrew-store.md, "Other
@@ -438,12 +471,35 @@ void draw_page(ImDrawList *draw, float scale, float x, float right, float alpha)
 			std::max(value_width, text_width(medium, LABEL_SIZE * scale, labels[i], CAPS_TRACKING)) + FACT_GAP * scale;
 	}
 	const float plate_y = y - 4.0f * scale;
-	draw->AddRectFilled(ImVec2(plate_x, plate_y), ImVec2(right, plate_y + PLATE_HEIGHT * scale), faded(WHITE, alpha));
-	const std::string action = std::string("A  ") + action_text(app);
+	const ImVec2 plate_end(right, plate_y + PLATE_HEIGHT * scale);
+	std::string action = std::string("A  ") + action_text(app);
+	ImU32 action_colour = BACKGROUND;
+	if (busy_on(app)) {
+		// Under way: the plate dark, filling as it goes.
+		const StoreProgress *const progress = store_worker_progress();
+		const float done = progress->total_bytes ? (float)progress->done_bytes / (float)progress->total_bytes : 0.0f;
+		draw->AddRectFilled(ImVec2(plate_x, plate_y), plate_end, faded(SELECTED, alpha));
+		draw->AddRectFilled(ImVec2(plate_x, plate_y),
+			ImVec2(plate_x + PLATE_WIDTH * scale * std::min(done, 1.0f), plate_end.y), faded(FILL, alpha));
+		draw->AddRect(ImVec2(plate_x, plate_y), plate_end, faded(RULE, alpha));
+		char text[32];
+		const char *const step = progress->step == STORE_STEP_DOWNLOADING ? "Downloading"
+			: progress->step == STORE_STEP_INSTALLING                     ? "Installing"
+																		  : "Removing";
+		snprintf(text, sizeof text, progress->total_bytes ? "%s %d%%" : "%s", step, (int)(done * 100.0f));
+		action = text;
+		action_colour = TEXT;
+	} else {
+		draw->AddRectFilled(ImVec2(plate_x, plate_y), plate_end, faded(WHITE, alpha));
+	}
 	draw_text(draw, bold, PLATE_SIZE * scale,
 		ImVec2(plate_x + (PLATE_WIDTH * scale - text_width(bold, PLATE_SIZE * scale, action)) / 2.0f,
 			plate_y + (PLATE_HEIGHT * scale - PLATE_SIZE * scale) / 2.0f),
-		faded(BACKGROUND, alpha), action);
+		faded(action_colour, alpha), action);
+	if (!state.message.empty() && state.message_app == selected_app()) {
+		draw_text(draw, regular, MESSAGE_LINE_SIZE * scale, ImVec2(x, y + 48.0f * scale), faded(GREY, alpha),
+			fitted(regular, MESSAGE_LINE_SIZE * scale, state.message, width));
+	}
 
 	const float shot_top = PAGE_SHOT_TOP * scale;
 	const float shot_height = std::min(BOTTOM * scale - shot_top, width * 9.0f / 16.0f);
@@ -478,6 +534,50 @@ void draw_message(ImDrawList *draw, ImVec2 size, float scale, const std::string 
 		draw_wrapped(draw, regular, HINT_SIZE * scale, HINT_SIZE * scale * 1.35f,
 			ImVec2(SAFE_X * scale, y + MESSAGE_SIZE * scale * 3.0f), width, 3, GREY, detail.c_str());
 	}
+}
+
+// The screens veiled, and a panel saying what's asked and what A and B do.
+void draw_overlay(ImDrawList *draw, ImVec2 size, float scale)
+{
+	const StoreApp &app = state.catalogue->apps[state.overlay_app];
+	const std::string name = app.name;
+	const std::string folder = std::string(apps_folder) + app.id;
+	std::string title;
+	std::string body;
+	const char *hints = "";
+	if (state.overlay == WARNING) {
+		// xsdk's docs/scope/63-homebrew-store.md, "Other people's homebrew".
+		title = name + " isn't by xenosworks";
+		body = name + " is made by " + app.author +
+			", not xenosworks. xenosworks lists it but hasn't checked what it " +
+			"does, and isn't responsible for any damage to your console or your files.";
+		hints = "A  install     B  cancel";
+	} else if (state.overlay == REMOVAL) {
+		title = "Remove " + name + "?";
+		body = "Its files go from " + folder + ". What it made itself, its saves and settings, stays unless you " +
+			"choose to delete that too.";
+		hints = "A  remove     B  cancel";
+	} else {
+		title = "Delete what " + name + " made?";
+		body = std::to_string(state.leftovers) + (state.leftovers == 1 ? " file it made is" : " files it made are") +
+			" still in " + folder + ": its saves, settings and the like. Deleted, they're gone for good.";
+		hints = "A  delete     B  keep";
+	}
+	draw->AddRectFilled(ImVec2(0.0f, 0.0f), size, VEIL);
+	const float width = OVERLAY_WIDTH * scale;
+	const float pad = OVERLAY_PAD * scale;
+	const float height = pad * 2.0f + (OVERLAY_TITLE_SIZE + 22.0f + OVERLAY_LINE * 4.0f + 18.0f + HINT_SIZE) * scale;
+	const ImVec2 from((size.x - width) / 2.0f, (size.y - height) / 2.0f);
+	draw->AddRectFilled(from, ImVec2(from.x + width, from.y + height), PANEL);
+	draw->AddRect(from, ImVec2(from.x + width, from.y + height), RULE);
+	float y = from.y + pad;
+	draw_text(draw, bold, OVERLAY_TITLE_SIZE * scale, ImVec2(from.x + pad, y), TEXT,
+		fitted(bold, OVERLAY_TITLE_SIZE * scale, title, width - pad * 2.0f));
+	y += (OVERLAY_TITLE_SIZE + 22.0f) * scale;
+	draw_wrapped(draw, regular, OVERLAY_BODY_SIZE * scale, OVERLAY_LINE * scale, ImVec2(from.x + pad, y),
+		width - pad * 2.0f, 4, GREY, body.c_str());
+	y += (OVERLAY_LINE * 4.0f + 18.0f) * scale;
+	draw_text(draw, regular, HINT_SIZE * scale, ImVec2(from.x + pad, y), DIM, hints);
 }
 
 void draw_store(ImDrawList *draw, ImVec2 size)
@@ -528,10 +628,14 @@ void draw_store(ImDrawList *draw, ImVec2 size)
 		draw_panel(draw, scale, state.from, list_look(state.from).width, right, 1.0f - t);
 	draw_panel(draw, scale, state.level, list_width, right, moving ? t : 1.0f);
 
-	const char *const hints = state.level == CATEGORIES ? "A  open     B  quit"
-		: state.level == APPS                           ? "A  open     B  back"
-														: "B  back";
+	std::string hints = state.level == CATEGORIES ? "A  open     B  quit" : "A  open     B  back";
+	if (state.level == PAGE) {
+		const StoreApp &app = state.catalogue->apps[selected_app()];
+		hints = app.receipt ? "X  remove     B  back" : "B  back";
+	}
 	draw_text(draw, regular, HINT_SIZE * scale, ImVec2(SAFE_X * scale, (BOTTOM - HINT_SIZE) * scale), DIM, hints);
+	if (state.overlay != NO_OVERLAY)
+		draw_overlay(draw, size, scale);
 }
 
 void go(Level level)
@@ -667,7 +771,7 @@ bool present(uint32_t width, uint32_t height, const char *shot)
 
 void take_catalogue()
 {
-	const StoreCatalogue *catalogue;
+	StoreCatalogue *catalogue;
 	if (state.catalogue || !store_worker_catalogue(&catalogue, &state.source, &state.why))
 		return;
 	state.catalogue = catalogue;
@@ -676,13 +780,78 @@ void take_catalogue()
 		state.apps[catalogue->apps[i].category].push_back(i);
 }
 
-// shots: what to write once the screen it's for has settled, then the press that moves on.
+// A job's result put into its app's entry, and what it said kept for the app's page.
+void tend_job()
+{
+	state.busy = store_worker_busy(&state.busy_app);
+	StoreJobResult result;
+	if (!store_worker_take_job(&result))
+		return;
+	StoreApp &app = state.catalogue->apps[result.app];
+	app.installed = result.installed;
+	app.installed_version = result.installed_version;
+	app.receipt = result.receipt;
+	app.receipt_author_same = result.receipt_author_same;
+	state.message_app = result.app;
+	if (!result.done)
+		state.message =
+			std::string(result.kind == STORE_JOB_INSTALL ? "Not installed: " : "Not removed: ") + result.why;
+	else if (result.kind == STORE_JOB_INSTALL)
+		state.message = std::string("Installed in ") + apps_folder + app.id;
+	else
+		state.message = "Removed";
+	if (result.done && result.kind == STORE_JOB_REMOVE && result.other_files) {
+		state.overlay = LEFTOVERS;
+		state.overlay_app = result.app;
+		state.leftovers = result.other_files;
+	}
+}
+
+// A on an app's page: its install, after the word if it isn't by xenosworks and the store hasn't installed it from
+// that author before. Opening an installed app comes with step 6.
+void act(size_t index)
+{
+	const StoreApp &app = state.catalogue->apps[index];
+	if (state.busy || (app.installed != STORE_INSTALLED_NONE && app.installed != STORE_INSTALLED_OLDER))
+		return;
+	if (strcasecmp(app.author, "xenosworks") != 0 && !(app.receipt && app.receipt_author_same)) {
+		state.overlay = WARNING;
+		state.overlay_app = index;
+		return;
+	}
+	store_worker_job(STORE_JOB_INSTALL, index);
+}
+
+// What A does on the overlay; B closes it.
+void answer(bool yes)
+{
+	const Overlay overlay = state.overlay;
+	state.overlay = NO_OVERLAY;
+	if (!yes)
+		return;
+	if (overlay == WARNING)
+		store_worker_job(STORE_JOB_INSTALL, state.overlay_app);
+	else
+		store_worker_job(overlay == REMOVAL ? STORE_JOB_REMOVE : STORE_JOB_REMOVE_ALL, state.overlay_app);
+}
+
+// shots: presses and screens written, each once the screens have settled.
+enum Act { SHOOT, PRESS_A, PRESS_B, PRESS_DOWN };
 struct Step {
-	Level level;
+	Act act;
 	const char *name;
 };
-const Step SHOT_STEPS[] = { { CATEGORIES, "shot_categories.ppm" }, { APPS, "shot_apps.ppm" },
-	{ PAGE, "shot_app.ppm" } };
+const Step SHOT_STEPS[] = { { SHOOT, "shot_categories.ppm" }, { PRESS_A, nullptr }, { SHOOT, "shot_apps.ppm" },
+	{ PRESS_A, nullptr }, { SHOOT, "shot_app.ppm" }, { PRESS_A, nullptr }, { SHOOT, "shot_installed.ppm" },
+	{ PRESS_B, nullptr }, { PRESS_B, nullptr }, { PRESS_DOWN, nullptr }, { PRESS_A, nullptr }, { PRESS_A, nullptr },
+	{ PRESS_A, nullptr }, { SHOOT, "shot_warning.ppm" } };
+
+// Settled: no slide, no job, and the screenshot in, or come to nothing, if the screen shows one.
+bool settled()
+{
+	return state.transition == TRANSITION_FRAMES && !state.busy &&
+		(state.level == CATEGORIES || state.apps[state.category].empty() || shot_of(selected_app()));
+}
 
 } // namespace
 
@@ -715,33 +884,37 @@ void ui_close(void)
 	ImGui::DestroyContext();
 }
 
-void ui_run(uint32_t width, uint32_t height, bool shots)
+void ui_run(uint32_t width, uint32_t height, const char *apps, bool shots)
 {
+	apps_folder = apps;
 	size_t step = 0;
-	uint32_t settled = 0;
-	// shots: A, the frame after a screen is written.
-	bool advance = false;
+	uint32_t settled_frames = 0;
 	for (;; state.frame++) {
 		ImGui_ImplXsdk_NewFrame(width, height);
 		ImGui::NewFrame();
 		take_catalogue();
 		const bool usable = state.catalogue && state.source != STORE_NONE && state.catalogue->category_count;
-		const bool open = pressed(ImGuiKey_GamepadFaceDown) || advance;
-		advance = false;
-		const bool back = pressed(ImGuiKey_GamepadFaceRight);
+		if (usable)
+			tend_job();
+		bool open = pressed(ImGuiKey_GamepadFaceDown);
+		bool back = pressed(ImGuiKey_GamepadFaceRight);
+		int by = vertical();
 		const char *shot = nullptr;
-		if (shots && step < IM_ARRAYSIZE(SHOT_STEPS) && usable && state.transition == TRANSITION_FRAMES) {
-			// Each screen once it has drawn a few frames and its screenshot, if it shows one, has come or failed.
-			const bool shot_in = state.level == CATEGORIES || state.apps[state.category].empty() ||
-				shot_of(selected_app()) || settled > SHOT_WAIT_FRAMES;
-			settled++;
-			if (shot_in && settled > SHOT_FRAMES) {
-				shot = SHOT_STEPS[step++].name;
-				advance = step < IM_ARRAYSIZE(SHOT_STEPS);
-				settled = 0;
+		if (shots && step < IM_ARRAYSIZE(SHOT_STEPS) && usable) {
+			settled_frames = settled() || settled_frames > SHOT_WAIT_FRAMES ? settled_frames + 1 : 0;
+			if (settled_frames > SHOT_FRAMES) {
+				const Step &next = SHOT_STEPS[step++];
+				shot = next.act == SHOOT ? next.name : nullptr;
+				open = next.act == PRESS_A;
+				back = next.act == PRESS_B;
+				by = next.act == PRESS_DOWN ? 1 : by;
+				settled_frames = 0;
 			}
 		}
-		if (state.catalogue && state.source == STORE_NONE) {
+		if (state.overlay != NO_OVERLAY) {
+			if (open || back)
+				answer(open);
+		} else if (state.catalogue && state.source == STORE_NONE) {
 			if (open) {
 				store_worker_retry();
 				state.catalogue = nullptr;
@@ -751,7 +924,6 @@ void ui_run(uint32_t width, uint32_t height, bool shots)
 				return;
 			}
 		} else if (usable && state.transition == TRANSITION_FRAMES) {
-			const int by = vertical();
 			if (state.level == CATEGORIES) {
 				state.category = moved(state.category, by, state.catalogue->category_count);
 				if (by) {
@@ -765,8 +937,15 @@ void ui_run(uint32_t width, uint32_t height, bool shots)
 				state.row[APPS] = moved(state.row[APPS], by, state.apps[state.category].size());
 				if (state.row[APPS] != before)
 					state.rest = 0;
-				if (open && state.level == APPS)
+				if (open && state.level == PAGE)
+					act(selected_app());
+				else if (open)
 					go(PAGE);
+				if (state.level == PAGE && pressed(ImGuiKey_GamepadFaceLeft) && !state.busy &&
+					state.catalogue->apps[selected_app()].receipt) {
+					state.overlay = REMOVAL;
+					state.overlay_app = selected_app();
+				}
 			}
 			if (back) {
 				if (state.level == CATEGORIES) {
@@ -786,7 +965,7 @@ void ui_run(uint32_t width, uint32_t height, bool shots)
 			tend_shots();
 		draw_store(ImGui::GetBackgroundDrawList(), ImVec2((float)width, (float)height));
 		ImGui::Render();
-		if (!present(width, height, shot) || (shots && step == IM_ARRAYSIZE(SHOT_STEPS)))
+		if (!present(width, height, shot) || (shots && step == IM_ARRAYSIZE(SHOT_STEPS) && shot))
 			return;
 	}
 }
