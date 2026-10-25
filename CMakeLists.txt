@@ -1,8 +1,7 @@
 # The Homebrew App Store, an Xbox 360 title on xsdk (https://github.com/xenosworks/xsdk), and store_check, its checks
 # on the console. Build xsdk first (make in its checkout), check out imgui-xenon, curl-xenon and mbedtls-xenon beside
 # this repository or name them below, then:
-#   cmake -S . -B build -GNinja -DCMAKE_TOOLCHAIN_FILE=<xsdk>/cmake/xsdk.cmake -DCMAKE_BUILD_TYPE=Release \
-#       -DSTORE_PUBLIC_KEY=<the catalogue's .pub.pem>
+#   cmake -S . -B build -GNinja -DCMAKE_TOOLCHAIN_FILE=<xsdk>/cmake/xsdk.cmake -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build
 cmake_minimum_required(VERSION 3.25)
 project(homebrew_app_store C CXX ASM)
@@ -10,8 +9,10 @@ project(homebrew_app_store C CXX ASM)
 set(IMGUI_XENON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../imgui-xenon" CACHE PATH "A checkout of imgui-xenon")
 set(CURL_XENON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../curl-xenon" CACHE PATH "A checkout of curl-xenon")
 set(MBEDTLS_XENON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../mbedtls-xenon" CACHE PATH "A checkout of mbedtls-xenon")
-# The store takes only catalogues this key signed, so a build names it; there's no default to fall back on.
-set(STORE_PUBLIC_KEY "" CACHE FILEPATH "The catalogue's public key, from xsdk's tools/store_catalogue.py keygen")
+# The store takes only catalogues this key signed: xenosworks's, whose private half is kept off line. The checks build
+# with tests/make_site.py's test key in its place.
+set(STORE_PUBLIC_KEY "${CMAKE_CURRENT_SOURCE_DIR}/keys/catalogue.pub.pem"
+	CACHE FILEPATH "The catalogue's public key, from xsdk's tools/store_catalogue.py keygen")
 set(STORE_CATALOGUE_URL "https://xenosworks.github.io/homebrew-app-catalogue/catalogue.json"
 	CACHE STRING "Where the store fetches the catalogue until a catalogue it kept names another address")
 if(NOT EXISTS "${STORE_PUBLIC_KEY}")

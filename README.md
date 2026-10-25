@@ -51,13 +51,12 @@ Build xsdk (`make` in its checkout), and check out [imgui-xenon](https://github.
 beside this repository. Then, in WSL or Linux:
 
 ```bash
-cmake -S . -B build -GNinja -DCMAKE_TOOLCHAIN_FILE=<xsdk>/cmake/xsdk.cmake -DCMAKE_BUILD_TYPE=Release \
-    -DSTORE_PUBLIC_KEY=<the catalogue's key.pub.pem>
+cmake -S . -B build -GNinja -DCMAKE_TOOLCHAIN_FILE=<xsdk>/cmake/xsdk.cmake -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-That makes `build/homebrew_app_store.xex`; `cacert.pem` goes beside it on the console. `STORE_PUBLIC_KEY` has no
-default: a store trusts only the key it's built with.
+That makes `build/homebrew_app_store.xex`; `cacert.pem` goes beside it on the console. It trusts the catalogue's key,
+`keys/catalogue.pub.pem`, alone; `STORE_PUBLIC_KEY` names another for a build signed some other way, as the checks'.
 
 ## Checking
 
